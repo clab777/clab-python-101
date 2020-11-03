@@ -2,16 +2,21 @@ pipeline {
 //None parameter in the agent section means that no global agent will be allocated for the entire Pipeline’s
 //execution and that each stage directive must specify its own agent section.
     agent none
-    
-    stage('Build environment') {
-            steps {
-                echo "Building virtualenv"
-                sh  ''' 
-                    pip install -r requirements.txt
-                '''
-            }
-    }
+
     stages {
+            
+        stage('Build environment') {
+            agent {
+                label 'docker'
+            }
+
+            steps {
+                    echo "Building virtualenv"
+                    sh  ''' 
+                        pip install -r requirements.txt
+                    '''
+                }
+        }
         stage('Build') {
             agent {
                 label 'docker'
