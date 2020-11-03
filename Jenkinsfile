@@ -3,10 +3,7 @@ pipeline {
     stages {
         stage('Build') {
             agent {
-               
-                docker {
-                    image 'python:3-alpine'
-                }
+               label 'docker'
             }
             steps {
                 withEnv(["HOME=${env.WORKSPACE}"]) {
