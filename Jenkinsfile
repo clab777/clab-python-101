@@ -13,6 +13,7 @@ pipeline {
             steps {
                     echo "Building virtualenv"
                     sh  ''' 
+                        sudo easy_install pip
                         pip install -r requirements.txt
                     '''
                 }
