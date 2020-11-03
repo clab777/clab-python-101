@@ -3,7 +3,7 @@ pipeline {
     stages {
         stage('Build') {
             agent {
-                label 'docker'
+               
                 docker {
                     image 'python:3-alpine'
                 }
