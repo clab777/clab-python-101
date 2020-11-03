@@ -1,136 +1,83 @@
 pipeline {
-    agent any
-
-
-    options {
-        skipDefaultCheckout(true)
-        // Keep the 10 most recent builds
-        buildDiscarder(logRotator(numToKeepStr: '10'))
-        timestamps()
-    }
-
-    environment {
-      PATH="/var/lib/jenkins/miniconda3/bin:$PATH"
-    }
-
+//None parameter in the agent section means that no global agent will be allocated for the entire Pipeline’s
+//execution and that each stage directive must specify its own agent section.
+    agent none
     stages {
-
-        stage ("Code pull"){
-            steps{
-                checkout scm
-            }
-        }
-
-        stage('Build environment') {
-            steps {
-                echo "Building virtualenv"
-                sh  ''' conda create --yes -n ${BUILD_TAG} python
-                        source activate ${BUILD_TAG}
-                        pip install -r requirements/dev.txt
-                    '''
-            }
-        }
-
-        stage('Static code metrics') {
-            steps {
-                echo "Raw metrics"
-                sh  ''' source activate ${BUILD_TAG}
-                        radon raw --json irisvmpy > raw_report.json
-                        radon cc --json irisvmpy > cc_report.json
-                        radon mi --json irisvmpy > mi_report.json
-                        sloccount --duplicates --wide irisvmpy > sloccount.sc
-                    '''
-                echo "Test coverage"
-                sh  ''' source activate ${BUILD_TAG}
-                        coverage run irisvmpy/iris.py 1 1 2 3
-                        python -m coverage xml -o reports/coverage.xml
-                    '''
-                echo "Style check"
-                sh  ''' source activate ${BUILD_TAG}
-                        pylint irisvmpy || true
-                    '''
-            }
-            post{
-                always{
-                    step([$class: 'CoberturaPublisher',
-                                   autoUpdateHealth: false,
-                                   autoUpdateStability: false,
-                                   coberturaReportFile: 'reports/coverage.xml',
-                                   failNoReports: false,
-                                   failUnhealthy: false,
-                                   failUnstable: false,
-                                   maxNumberOfBuilds: 10,
-                                   onlyStable: false,
-                                   sourceEncoding: 'ASCII',
-                                   zoomCoverageChart: false])
+        stage('Build') {
+            agent {
+                docker {
+                    //This image parameter (of the agent section’s docker parameter) downloads the python:2-alpine
+                    //Docker image and runs this image as a separate container. The Python container becomes
+                    //the agent that Jenkins uses to run the Build stage of your Pipeline project.
+                    image 'python:2-alpine'
                 }
             }
-        }
-
-
-
-        stage('Unit tests') {
             steps {
-                sh  ''' source activate ${BUILD_TAG}
-                        python -m pytest --verbose --junit-xml reports/unit_tests.xml
-                    '''
+                //This sh step runs the Python command to compile your application and
+                //its calc library into byte code files, which are placed into the sources workspace directory
+                sh 'python -m py_compile sources/add2vals.py sources/calc.py'
+                //This stash step saves the Python source code and compiled byte code files from the sources
+                //workspace directory for use in later stages.
+                stash(name: 'compiled-results', includes: 'sources/*.py*')
+            }
+        }
+        stage('Test') {
+            agent {
+                docker {
+                    //This image parameter downloads the qnib:pytest Docker image and runs this image as a
+                    //separate container. The pytest container becomes the agent that Jenkins uses to run the Test
+                    //stage of your Pipeline project.
+                    image 'qnib/pytest'
+                }
+            }
+            steps {
+                //This sh step executes pytest’s py.test command on sources/test_calc.py, which runs a set of
+                //unit tests (defined in test_calc.py) on the "calc" library’s add2 function.
+                //The --junit-xml test-reports/results.xml option makes py.test generate a JUnit XML report,
+                //which is saved to test-reports/results.xml
+                sh 'py.test --verbose --junit-xml test-reports/results.xml sources/test_calc.py'
             }
             post {
                 always {
-                    // Archive unit tests for the future
-                    junit allowEmptyResults: true, testResults: 'reports/unit_tests.xml'
+                    //This junit step archives the JUnit XML report (generated by the py.test command above) and
+                    //exposes the results through the Jenkins interface.
+                    //The post section’s always condition that contains this junit step ensures that the step is
+                    //always executed at the completion of the Test stage, regardless of the stage’s outcome.
+                    junit 'test-reports/results.xml'
                 }
             }
         }
+        stage('Deliver') {
+                    agent any
+                    //This environment block defines two variables which will be used later in the 'Deliver' stage.
+                    environment {
+                        VOLUME = '$(pwd)/sources:/src'
+                        IMAGE = 'cdrx/pyinstaller-linux:python2'
+                    }
+                    steps {
+                        //This dir step creates a new subdirectory named by the build number.
+                        //The final program will be created in that directory by pyinstaller.
+                        //BUILD_ID is one of the pre-defined Jenkins environment variables.
+                        //This unstash step restores the Python source code and compiled byte
+                        //code files (with .pyc extension) from the previously saved stash. image]
+                        //and runs this image as a separate container.
+                        dir(path: env.BUILD_ID) {
+                            unstash(name: 'compiled-results')
 
-        stage('Acceptance tests') {
-            steps {
-                sh  ''' source activate ${BUILD_TAG}
-                        behave -f=formatters.cucumber_json:PrettyCucumberJSONFormatter -o ./reports/acceptance.json || true
-                    '''
-            }
-            post {
-                always {
-                    cucumber (buildStatus: 'SUCCESS',
-                    fileIncludePattern: '**/*.json',
-                    jsonReportDirectory: './reports/',
-                    parallelTesting: true,
-                    sortingMethod: 'ALPHABETICAL')
-                }
-            }
-        }
-
-        stage('Build package') {
-            when {
-                expression {
-                    currentBuild.result == null || currentBuild.result == 'SUCCESS'
-                }
-            }
-            steps {
-                sh  ''' source activate ${BUILD_TAG}
-                        python setup.py bdist_wheel
-                    '''
-            }
-            post {
-                always {
-                    // Archive unit tests for the future
-                    archiveArtifacts allowEmptyArchive: true, artifacts: 'dist/*whl', fingerprint: true
-                }
-            }
-        }
-
-    }
-
-    post {
-        always {
-            sh 'conda remove --yes -n ${BUILD_TAG} --all'
-        }
-        failure {
-            emailext (
-                subject: "FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]'",
-                body: """<p>FAILED: Job '${env.JOB_NAME} [${env.BUILD_NUMBER}]':</p>
-                         <p>Check console output at &QUOT;<a href='${env.BUILD_URL}'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a>&QUOT;</p>""",
-                recipientProviders: [[$class: 'DevelopersRecipientProvider']])
+                            //This sh step executes the pyinstaller command (in the PyInstaller container) on your simple Python application.
+                            //This bundles your add2vals.py Python application into a single standalone executable file
+                            //and outputs this file to the dist workspace directory (within the Jenkins home directory).
+                            sh "docker run --rm -v ${VOLUME} ${IMAGE} 'pyinstaller -F add2vals.py'"
+                        }
+                    }
+                    post {
+                        success {
+                            //This archiveArtifacts step archives the standalone executable file and exposes this file
+                            //through the Jenkins interface.
+                            archiveArtifacts "${env.BUILD_ID}/sources/dist/add2vals"
+                            sh "docker run --rm -v ${VOLUME} ${IMAGE} 'rm -rf build dist'"
+                        }
+                    }
         }
     }
 }
